@@ -35,7 +35,7 @@ export async function verifyLogin(email: string, password: string) {
     id: user.id,
     email: user.email,
     name: user.name,
-    permissions: [...new Set(permissions)],
+    permissions: Array.from(new Set(permissions)),
   };
 }
 
@@ -89,7 +89,7 @@ export async function getSession(req: Request) {
     id: user.id,
     email: user.email,
     name: user.name,
-    permissions: [...new Set(permissions)],
+    permissions: Array.from(new Set(permissions)),
   };
 }
 
