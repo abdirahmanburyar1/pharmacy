@@ -1,0 +1,415 @@
+// Pharmacy POS - Database Schema
+// Designed for: RBAC, batch inventory, workflow approvals, audit logging, future multi-branch
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============ RBAC ============
+model User {
+  id            String    @id @default(cuid())
+  email         String    @unique
+  passwordHash  String    @map("password_hash")
+  name          String
+  isActive      Boolean   @default(true) @map("is_active")
+  branchId      String?   @map("branch_id") // Future: multi-branch
+  createdAt     DateTime  @default(now()) @map("created_at")
+  updatedAt     DateTime  @updatedAt @map("updated_at")
+
+  userRoles     UserRole[]
+  sales         Sale[]    @relation("CashierSales")
+  auditLogs     AuditLog[]
+  createdPurchases Purchase[] @relation("PurchaseCreator")
+  approvedPurchases Purchase[] @relation("PurchaseApprover")
+  createdDisposals Disposal[] @relation("DisposalCreator")
+  approvedDisposals Disposal[] @relation("DisposalApprover")
+  createdAdjustments StockAdjustment[] @relation("AdjustmentCreator")
+  approvedAdjustments StockAdjustment[] @relation("AdjustmentApprover")
+
+  @@map("users")
+}
+
+model Role {
+  id          String   @id @default(cuid())
+  name        String   @unique
+  description String?
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  rolePermissions RolePermission[]
+  userRoles       UserRole[]
+
+  @@map("roles")
+}
+
+model Permission {
+  id          String   @id @default(cuid())
+  code        String   @unique  // e.g. "sell_medicine", "create_purchase"
+  name        String
+  description String?
+  module      String   // e.g. "sales", "inventory", "purchasing"
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  rolePermissions RolePermission[]
+
+  @@map("permissions")
+}
+
+model RolePermission {
+  id           String   @id @default(cuid())
+  roleId       String   @map("role_id")
+  permissionId String   @map("permission_id")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  role       Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@unique([roleId, permissionId])
+  @@map("role_permissions")
+}
+
+model UserRole {
+  id        String   @id @default(cuid())
+  userId    String   @map("user_id")
+  roleId    String   @map("role_id")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role Role @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, roleId])
+  @@map("user_roles")
+}
+
+// ============ Products & Inventory ============
+model Product {
+  id          String   @id @default(cuid())
+  name        String
+  genericName String?  @map("generic_name")
+  sku         String?  @unique
+  barcode     String?  @unique
+  unit        String   @default("pcs")
+  category    String?
+  description String?
+  isActive    Boolean  @default(true) @map("is_active")
+  // Future: reorderLevel for low stock alerts
+  reorderLevel Int?    @map("reorder_level")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  batches      Batch[]
+  saleItems    SaleItem[]
+  purchaseItems PurchaseItem[]
+  disposalItems DisposalItem[]
+  adjustmentItems StockAdjustmentItem[]
+
+  @@map("products")
+}
+
+model Batch {
+  id            String   @id @default(cuid())
+  productId     String   @map("product_id")
+  batchNumber   String   @map("batch_number")
+  expiryDate    DateTime @map("expiry_date")
+  purchasePrice Decimal  @map("purchase_price") @db.Decimal(12, 2)
+  quantity      Int      @default(0)  // Remaining quantity
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  product       Product        @relation(fields: [productId], references: [id], onDelete: Cascade)
+  stockMovements StockMovement[]
+  disposalItems  DisposalItem[]
+  adjustmentItems StockAdjustmentItem[]
+  saleItems      SaleItem[]
+
+  @@unique([productId, batchNumber])
+  @@index([expiryDate])
+  @@index([productId, expiryDate])
+  @@map("batches")
+}
+
+model Supplier {
+  id        String   @id @default(cuid())
+  name      String
+  contact   String?
+  email     String?
+  phone     String?
+  address   String?
+  isActive  Boolean  @default(true) @map("is_active")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  purchases Purchase[]
+
+  @@map("suppliers")
+}
+
+// ============ Workflow Status ============
+enum WorkflowStatus {
+  DRAFT
+  PENDING_APPROVAL
+  APPROVED
+  REJECTED
+}
+
+// ============ Purchasing ============
+model Purchase {
+  id          String         @id @default(cuid())
+  orderNumber String         @unique @map("order_number")
+  supplierId  String         @map("supplier_id")
+  status      WorkflowStatus @default(DRAFT)
+  totalAmount Decimal        @map("total_amount") @db.Decimal(12, 2)
+  notes       String?
+  createdById String         @map("created_by_id")
+  approvedById String?       @map("approved_by_id")
+  approvedAt  DateTime?      @map("approved_at")
+  rejectedAt  DateTime?     @map("rejected_at")
+  rejectionReason String?    @map("rejection_reason")
+  createdAt   DateTime       @default(now()) @map("created_at")
+  updatedAt   DateTime       @updatedAt @map("updated_at")
+
+  supplier    Supplier       @relation(fields: [supplierId], references: [id])
+  createdBy   User           @relation("PurchaseCreator", fields: [createdById], references: [id])
+  approvedBy  User?          @relation("PurchaseApprover", fields: [approvedById], references: [id])
+  items       PurchaseItem[]
+  statusHistory PurchaseStatusHistory[]
+
+  @@map("purchases")
+}
+
+model PurchaseItem {
+  id          String   @id @default(cuid())
+  purchaseId  String   @map("purchase_id")
+  productId   String   @map("product_id")
+  batchNumber String   @map("batch_number")
+  expiryDate  DateTime @map("expiry_date")
+  quantity    Int
+  unitPrice   Decimal  @map("unit_price") @db.Decimal(12, 2)
+  totalPrice  Decimal  @map("total_price") @db.Decimal(12, 2)
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  purchase Purchase @relation(fields: [purchaseId], references: [id], onDelete: Cascade)
+  product  Product  @relation(fields: [productId], references: [id])
+
+  @@map("purchase_items")
+}
+
+model PurchaseStatusHistory {
+  id          String         @id @default(cuid())
+  purchaseId  String         @map("purchase_id")
+  status      WorkflowStatus
+  changedById String?        @map("changed_by_id")
+  reason      String?
+  createdAt   DateTime       @default(now()) @map("created_at")
+
+  purchase Purchase @relation(fields: [purchaseId], references: [id], onDelete: Cascade)
+
+  @@map("purchase_status_history")
+}
+
+// ============ Disposal ============
+model Disposal {
+  id           String         @id @default(cuid())
+  referenceNo  String         @unique @map("reference_no")
+  reason       String         // expired, damaged, recalled
+  status       WorkflowStatus @default(DRAFT)
+  totalValue   Decimal        @map("total_value") @db.Decimal(12, 2)
+  notes        String?
+  createdById  String         @map("created_by_id")
+  approvedById String?        @map("approved_by_id")
+  approvedAt   DateTime?      @map("approved_at")
+  rejectedAt   DateTime?      @map("rejected_at")
+  rejectionReason String?     @map("rejection_reason")
+  createdAt    DateTime      @default(now()) @map("created_at")
+  updatedAt    DateTime      @updatedAt @map("updated_at")
+
+  createdBy   User           @relation("DisposalCreator", fields: [createdById], references: [id])
+  approvedBy  User?          @relation("DisposalApprover", fields: [approvedById], references: [id])
+  items       DisposalItem[]
+  statusHistory DisposalStatusHistory[]
+
+  @@map("disposals")
+}
+
+model DisposalItem {
+  id          String   @id @default(cuid())
+  disposalId  String   @map("disposal_id")
+  productId   String   @map("product_id")
+  batchId     String   @map("batch_id")
+  quantity    Int
+  unitValue   Decimal  @map("unit_value") @db.Decimal(12, 2)
+  totalValue  Decimal  @map("total_value") @db.Decimal(12, 2)
+  reason      String?
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  disposal Disposal @relation(fields: [disposalId], references: [id], onDelete: Cascade)
+  product Product   @relation(fields: [productId], references: [id])
+  batch   Batch     @relation(fields: [batchId], references: [id])
+
+  @@map("disposal_items")
+}
+
+model DisposalStatusHistory {
+  id          String         @id @default(cuid())
+  disposalId  String         @map("disposal_id")
+  status      WorkflowStatus
+  changedById String?        @map("changed_by_id")
+  reason      String?
+  createdAt   DateTime       @default(now()) @map("created_at")
+
+  disposal Disposal @relation(fields: [disposalId], references: [id], onDelete: Cascade)
+
+  @@map("disposal_status_history")
+}
+
+// ============ Stock Adjustment ============
+model StockAdjustment {
+  id           String         @id @default(cuid())
+  referenceNo  String         @unique @map("reference_no")
+  reason       String         // count correction, return, etc.
+  status       WorkflowStatus @default(DRAFT)
+  notes        String?
+  createdById  String         @map("created_by_id")
+  approvedById String?        @map("approved_by_id")
+  approvedAt   DateTime?      @map("approved_at")
+  rejectedAt   DateTime?      @map("rejected_at")
+  rejectionReason String?     @map("rejection_reason")
+  createdAt    DateTime      @default(now()) @map("created_at")
+  updatedAt    DateTime      @updatedAt @map("updated_at")
+
+  createdBy   User           @relation("AdjustmentCreator", fields: [createdById], references: [id])
+  approvedBy  User?          @relation("AdjustmentApprover", fields: [approvedById], references: [id])
+  items       StockAdjustmentItem[]
+  statusHistory StockAdjustmentStatusHistory[]
+
+  @@map("stock_adjustments")
+}
+
+model StockAdjustmentItem {
+  id            String   @id @default(cuid())
+  adjustmentId  String   @map("adjustment_id")
+  productId     String   @map("product_id")
+  batchId       String   @map("batch_id")
+  quantityChange Int    @map("quantity_change") // + for add, - for reduce
+  reason        String?
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  adjustment StockAdjustment @relation(fields: [adjustmentId], references: [id], onDelete: Cascade)
+  product    Product         @relation(fields: [productId], references: [id])
+  batch      Batch           @relation(fields: [batchId], references: [id])
+
+  @@map("stock_adjustment_items")
+}
+
+model StockAdjustmentStatusHistory {
+  id            String         @id @default(cuid())
+  adjustmentId  String         @map("adjustment_id")
+  status        WorkflowStatus
+  changedById   String?        @map("changed_by_id")
+  reason        String?
+  createdAt     DateTime       @default(now()) @map("created_at")
+
+  adjustment StockAdjustment @relation(fields: [adjustmentId], references: [id], onDelete: Cascade)
+
+  @@map("stock_adjustment_status_history")
+}
+
+// ============ POS Sales ============
+model Sale {
+  id          String   @id @default(cuid())
+  saleNumber  String   @unique @map("sale_number")
+  totalAmount Decimal  @map("total_amount") @db.Decimal(12, 2)
+  discount    Decimal  @default(0) @db.Decimal(12, 2)
+  finalAmount Decimal  @map("final_amount") @db.Decimal(12, 2)
+  cashierId   String   @map("cashier_id")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  cashier   User         @relation("CashierSales", fields: [cashierId], references: [id])
+  items     SaleItem[]
+  payments  SalePayment[]
+
+  @@map("sales")
+}
+
+model SaleItem {
+  id          String   @id @default(cuid())
+  saleId      String   @map("sale_id")
+  productId   String   @map("product_id")
+  batchId     String   @map("batch_id")
+  quantity    Int
+  unitPrice   Decimal  @map("unit_price") @db.Decimal(12, 2)
+  totalPrice  Decimal  @map("total_price") @db.Decimal(12, 2)
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  sale    Sale    @relation(fields: [saleId], references: [id], onDelete: Cascade)
+  product Product @relation(fields: [productId], references: [id])
+  batch   Batch   @relation(fields: [batchId], references: [id])
+
+  @@map("sale_items")
+}
+
+model SalePayment {
+  id          String   @id @default(cuid())
+  saleId      String   @map("sale_id")
+  method      String   // cash, card, mobile, etc.
+  amount      Decimal  @db.Decimal(12, 2)
+  reference   String?
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  sale Sale @relation(fields: [saleId], references: [id], onDelete: Cascade)
+
+  @@map("sale_payments")
+}
+
+// ============ Stock Movement Tracking ============
+enum StockMovementType {
+  SALE
+  PURCHASE
+  DISPOSAL
+  ADJUSTMENT
+  RETURN
+}
+
+model StockMovement {
+  id            String           @id @default(cuid())
+  batchId       String           @map("batch_id")
+  type          StockMovementType
+  quantity      Int              // negative for out, positive for in
+  referenceId   String?          @map("reference_id") // sale_id, purchase_id, etc.
+  referenceType String?          @map("reference_type") // Sale, Purchase, Disposal, StockAdjustment
+  performedById String?         @map("performed_by_id")
+  createdAt     DateTime        @default(now()) @map("created_at")
+
+  batch Batch @relation(fields: [batchId], references: [id], onDelete: Cascade)
+
+  @@index([batchId])
+  @@index([type])
+  @@index([createdAt])
+  @@map("stock_movements")
+}
+
+// ============ Audit Logging ============
+model AuditLog {
+  id           String   @id @default(cuid())
+  userId       String   @map("user_id")
+  action       String   // e.g. "sale.create", "purchase.approve"
+  entityType   String   @map("entity_type") // Sale, Purchase, Product, User, Role
+  entityId     String   @map("entity_id")
+  previousValue Json?   @map("previous_value") // For updates
+  newValue     Json?    @map("new_value")
+  ipAddress    String?  @map("ip_address")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+  @@index([entityType, entityId])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
+
