@@ -40,7 +40,7 @@ export async function verifyLogin(email: string, password: string) {
 }
 
 export async function createToken(payload: { id: string; email: string }) {
-  return new SignJWT(payload)
+  return new SignJWT({ ...payload, sub: payload.id })
     .setProtectedHeader({ alg: 'HS256' })
     .setIssuedAt()
     .setExpirationTime(JWT_EXPIRES_IN)
@@ -62,10 +62,11 @@ export async function getSession(req: Request) {
   if (!token) return null;
 
   const payload = await verifyToken(token);
-  if (!payload?.id) return null;
+  const userId = payload?.id || payload?.sub;
+  if (!userId) return null;
 
   const user = await prisma.user.findUnique({
-    where: { id: payload.id },
+    where: { id: userId },
     include: {
       userRoles: {
         include: {
